@@ -21,8 +21,10 @@ const uint16_t DRIVE_SPEED = 800;  // 0..PWM_RANGE
 const char* WIFI_SSID     = "Ayaflo";
 const char* WIFI_PASSWORD = "12345678tan";
 
-const char* WS_HOST = "esp32-car-server.onrender.com";
-const uint16_t WS_PORT = 443;
+//const char* WS_HOST = "esp32-car-server.onrender.com";
+const char* WS_HOST = "27.71.20.43";
+//const uint16_t WS_PORT = 443;
+const uint16_t WS_PORT = 8080;
 const char* WS_PATH = "/car";
 
 WebSocketsClient webSocket;
@@ -153,7 +155,8 @@ void connectWiFi() {
 void connectWebSocket() {
   Serial.println("Connecting WebSocket...");
 
-  webSocket.beginSSL(WS_HOST, WS_PORT, WS_PATH);
+  //webSocket.beginSSL(WS_HOST, WS_PORT, WS_PATH);
+  webSocket.begin(WS_HOST, WS_PORT, WS_PATH);
   webSocket.onEvent(webSocketEvent);
 
   webSocket.setReconnectInterval(5000);
