@@ -46,9 +46,6 @@ static inline int16_t mic32_to_pcm16(int32_t v) {
   return (int16_t)v;
 }
 
-static uint32_t lastCmdMs = 0;
-static const uint32_t CMD_TIMEOUT_MS = 400;
-
 // WEBSOCKET PATHS
 const char* WS_PATH_CAR     = "/car";
 const char* WS_PATH_MIC     = "/mic";
@@ -280,7 +277,6 @@ void goBackwardLeft()  { ledcWrite(ENA, DRIVE_SPEED_FRONT); ledcWrite(ENB, DRIVE
 void goBackwardRight() { ledcWrite(ENA, DRIVE_SPEED_FRONT); ledcWrite(ENB, DRIVE_SPEED_BACK+10); setSteering(1);  setDrive(-1); }
 
 void handleCmdByte(uint8_t c) {
-  lastCmdMs = millis();
   switch (c) {
     case '1': goStop(); break;
     case '2': goForward(); break;
@@ -453,7 +449,7 @@ void connectWebSockets(const AppConfig& c) {
 
 // MIC STREAM
 void streamMicToServer() {
-  if (!wsMic.isConnected() || !wsMic.canSend()) return;
+  if (!wsMic.isConnected()) return;
   if (ESP.getFreeHeap() < 40 * 1024) return;
 
   size_t bytes_read = 0;
@@ -524,8 +520,5 @@ void loop() {
   wsSpeaker.loop();
 
   streamMicToServer();
-  if (millis() - lastCmdMs > CMD_TIMEOUT_MS) {
-    goStop();
-  }
   delay(2);
 }
