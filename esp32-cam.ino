@@ -180,17 +180,15 @@ void setupCamera() {
 
   if (psramFound()) {
     // config.frame_size   = FRAMESIZE_QQVGA; // 160x120
-    config.frame_size   = FRAMESIZE_QVGA; // 640x320
-    // config.jpeg_quality = 16;
+    config.frame_size   = FRAMESIZE_QCIF; // 176x144
     // config.fb_count     = 2;
-    config.jpeg_quality = 12;
+    config.jpeg_quality = 16;
     config.fb_count     = 3;
     config.grab_mode    = CAMERA_GRAB_LATEST;
   } else {
-    config.frame_size   = FRAMESIZE_QVGA;
+    config.frame_size   = FRAMESIZE_QCIF;
     // config.frame_size   = FRAMESIZE_QQVGA; // 160x120
-    // config.jpeg_quality = 18;
-    config.jpeg_quality = 14;
+    config.jpeg_quality = 18;
     config.fb_count     = 1;
   }
 
