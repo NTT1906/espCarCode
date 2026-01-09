@@ -179,11 +179,13 @@ void setupCamera() {
   config.pixel_format = PIXFORMAT_JPEG;
 
   if (psramFound()) {
-    config.frame_size   = FRAMESIZE_QQVGA; // 160x120
+    // config.frame_size   = FRAMESIZE_QQVGA; // 160x120
+    config.frame_size   = FRAMESIZE_QVGA; // 640x320
     config.jpeg_quality = 16;
     config.fb_count     = 2;
   } else {
-    config.frame_size   = FRAMESIZE_QQVGA;
+    config.frame_size   = FRAMESIZE_QVGA;
+    // config.frame_size   = FRAMESIZE_QQVGA; // 160x120
     config.jpeg_quality = 18;
     config.fb_count     = 1;
   }
@@ -264,7 +266,7 @@ void loop() {
   }
 
   // DROP FRAME nếu WS không sẵn sàng
-  if (!ws.isConnected() || !ws.canSend()) {
+  if (!ws.isConnected()) {
     esp_camera_fb_return(fb);
     return;
   }
