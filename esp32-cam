@@ -2,18 +2,8 @@
 #include <WebSocketsClient.h>
 #include "esp_camera.h"
 
-// ===== WIFI =====
-const char* WIFI_SSID = "Ayaflo";
-const char* WIFI_PASS = "12345678tan";
-
-// ===== WS SERVER =====
-// Nếu server bạn chạy HTTPS/WSS (443), dùng beginSSL; nếu ws thường (80/8080), dùng begin().
-//const char* WS_HOST = "esp32-car-server.onrender.com";
-//const uint16_t WS_PORT = 443;
-const char* WS_HOST = "27.71.20.43";
-const uint16_t WS_PORT = 8080;
-const char* WS_PATH = "/cam";
-
+// ===== WS PATH cố định, host/port sẽ nhận từ ESP32-S3 =====
+static const char* WS_PATH = "/cam";
 WebSocketsClient ws;
 
 // ===== AI THINKER PINOUT =====
@@ -34,37 +24,129 @@ WebSocketsClient ws;
 #define HREF_GPIO_NUM     23
 #define PCLK_GPIO_NUM     22
 
-// ~30 fps => ~33ms/frame
+// ~25 fps tùy mạng
 static uint32_t lastFrameMs = 0;
-static const uint32_t FRAME_INTERVAL_MS = 30; // 1000/30 ≈ 33.3
+static const uint32_t FRAME_INTERVAL_MS = 35;
 
+// ===== UART0 pins (ESP32-CAM): RX=GPIO3, TX=GPIO1 =====
+static const int CAM_UART_RX = 3;   // U0R
+static const int CAM_UART_TX = 1;   // U0T
+static const uint32_t CAM_BAUD = 115200;
+
+// ================== CONFIG ==================
+struct CamConfig {
+  String ssid;
+  String pass;
+  String host;
+  uint16_t port = 0;
+  bool valid = false;
+};
+
+static CamConfig gCfg;
+static bool gCameraReady = false;
+static bool gNetReady = false;
+
+static String gLineBuf;
+
+// ================== WS EVENT ==================
 void wsEvent(WStype_t type, uint8_t* payload, size_t length) {
   switch (type) {
     case WStype_CONNECTED:
-      Serial.println("[WS] cam connected");
+      // Tránh spam log vì đang dùng UART0 chung đường cấu hình
       ws.sendTXT("type:cam");
       break;
     case WStype_DISCONNECTED:
-      Serial.println("[WS] cam disconnected");
       break;
     default:
       break;
   }
 }
 
-void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  Serial.print("WiFi connecting");
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(200);
-    Serial.print(".");
-  }
-  Serial.println();
-  Serial.print("IP: ");
-  Serial.println(WiFi.localIP());
+// ================== PARSE CFG LINE ==================
+static bool extractValue(const String& line, const char* key, String& out) {
+  // tìm "key=" và lấy tới ký tự '|' hoặc hết chuỗi
+  String pat = String(key) + "=";
+  int s = line.indexOf(pat);
+  if (s < 0) return false;
+  s += pat.length();
+  int e = line.indexOf('|', s);
+  if (e < 0) e = line.length();
+  out = line.substring(s, e);
+  out.trim();
+  return true;
 }
 
+static bool parseCfgLine(String line, CamConfig& out) {
+  line.trim();
+  if (!line.startsWith("CFG|")) return false;
+
+  CamConfig c;
+  if (!extractValue(line, "ssid", c.ssid)) return false;
+  // pass có thể rỗng (wifi open), nên không bắt buộc extractValue pass
+  extractValue(line, "pass", c.pass);
+  if (!extractValue(line, "host", c.host)) return false;
+
+  String portStr;
+  if (!extractValue(line, "port", portStr)) return false;
+  int p = portStr.toInt();
+  if (p <= 0 || p > 65535) return false;
+  c.port = (uint16_t)p;
+
+  c.valid = (c.ssid.length() > 0 && c.host.length() > 0 && c.port > 0);
+  if (!c.valid) return false;
+
+  out = c;
+  return true;
+}
+
+// Đọc 1 dòng kết thúc bằng '\n' từ UART0, non-blocking
+static bool readCfgLineNonBlocking(String& outLine) {
+  while (Serial.available() > 0) {
+    char ch = (char)Serial.read();
+    if (ch == '\r') continue;
+
+    if (ch == '\n') {
+      outLine = gLineBuf;
+      gLineBuf = "";
+      outLine.trim();
+      return outLine.length() > 0;
+    } else {
+      // giới hạn buffer để tránh tràn RAM nếu nhiễu
+      if (gLineBuf.length() < 256) gLineBuf += ch;
+    }
+  }
+  return false;
+}
+
+// ================== WIFI / WS ==================
+static void disconnectNet() {
+  ws.disconnect();
+  WiFi.disconnect(true, true);
+  gNetReady = false;
+}
+
+static bool connectWiFiWithCfg(const CamConfig& c, uint32_t timeoutMs) {
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);
+  WiFi.begin(c.ssid.c_str(), c.pass.c_str());
+
+  uint32_t start = millis();
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(200);
+    if (millis() - start >= timeoutMs) return false;
+  }
+  return true;
+}
+
+static void setupWebSocketWithCfg(const CamConfig& c) {
+  // arduinoWebSockets hỗ trợ begin(String) và nội bộ gọi begin(host.c_str(), ...) [web:19]
+  ws.begin(c.host.c_str(), c.port, WS_PATH);
+  ws.onEvent(wsEvent);
+  ws.setReconnectInterval(3000);
+  ws.enableHeartbeat(15000, 3000, 2);
+}
+
+// ================== CAMERA ==================
 void setupCamera() {
   camera_config_t config;
   config.ledc_channel = LEDC_CHANNEL_0;
@@ -89,82 +171,87 @@ void setupCamera() {
   config.pixel_format = PIXFORMAT_JPEG;
 
   if (psramFound()) {
-    // Ưu tiên fps cao: QVGA hoặc CIF; chất lượng cao hơn (số lớn) -> kích thước nhỏ -> gửi nhanh [web:154]
-    config.frame_size   = FRAMESIZE_QQVGA;   // 320x240 (có thể thử FRAMESIZE_CIF 400x296)
-    config.jpeg_quality = 16;               // 10..20; số càng lớn nén càng mạnh -> file nhỏ
-    config.fb_count     = 2;                // 2 buffer giúp pipeline mượt hơn khi có PSRAM
+    config.frame_size   = FRAMESIZE_QQVGA;  // 160x120
+    config.jpeg_quality = 16;
+    config.fb_count     = 2;
   } else {
-    config.frame_size   = FRAMESIZE_QQVGA;  // không PSRAM -> hạ thấp hơn để giữ fps
+    config.frame_size   = FRAMESIZE_QQVGA;
     config.jpeg_quality = 18;
     config.fb_count     = 1;
   }
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
-    Serial.printf("Camera init failed: 0x%x\n", err);
-    delay(1000);
+    delay(500);
     ESP.restart();
   }
+  gCameraReady = true;
 }
 
-void setupWebSocket() {
-  //ws.beginSSL(WS_HOST, WS_PORT, WS_PATH);
-  ws.begin(WS_HOST, WS_PORT, WS_PATH);
-  ws.onEvent(wsEvent);
-  ws.setReconnectInterval(3000);
-  // Heartbeat để giữ kết nối ổn định khi idle (nếu server hỗ trợ ping/pong) [web:154]
-  ws.enableHeartbeat(15000, 3000, 2);
+// ================== APPLY NEW CFG ==================
+static bool sameCfg(const CamConfig& a, const CamConfig& b) {
+  return a.ssid == b.ssid && a.pass == b.pass && a.host == b.host && a.port == b.port;
 }
 
+static void applyConfigAndConnect(const CamConfig& c) {
+  // Nếu đang chạy rồi mà nhận cấu hình mới => reconnect
+  disconnectNet();
+
+  bool ok = connectWiFiWithCfg(c, 20000);
+  if (!ok) {
+    // Nếu WiFi fail thì quay lại trạng thái chờ config mới
+    gNetReady = false;
+    return;
+  }
+
+  if (!gCameraReady) setupCamera();
+  setupWebSocketWithCfg(c);
+  gNetReady = true;
+}
+
+// ================== SETUP / LOOP ==================
 void setup() {
-  Serial.begin(115200);
+  // Dùng UART0 để nhận cấu hình từ ESP32-S3 (GPIO3 RX, GPIO1 TX) [web:30][web:27]
+  Serial.begin(CAM_BAUD, SERIAL_8N1, CAM_UART_RX, CAM_UART_TX);
   delay(200);
 
-  WiFi.mode(WIFI_STA);
-  WiFi.setSleep(false);  
-
-  connectWiFi();
-  setupCamera();
-  setupWebSocket();
+  // Không connect WiFi ở đây nữa.
+  // Chỉ chờ cấu hình từ ESP32-S3.
 }
 
-// void loop() {
-//   ws.loop();
-
-//   // Gửi frame nếu WS đã kết nối và đủ nhịp cho ~30 fps
-//   if (ws.isConnected() && (millis() - lastFrameMs >= FRAME_INTERVAL_MS)) {
-//     lastFrameMs = millis();
-
-//     camera_fb_t* fb = esp_camera_fb_get();
-//     //if (!fb) {
-//     //  Serial.println("Camera capture failed");
-//     //  return;
-//     //}
-
-//     // Gửi JPEG binary frame
-//     ws.sendBIN(fb->buf, fb->len);
-
-//     esp_camera_fb_return(fb);
-//   }
-
-//   yield();
-// }
 void loop() {
+  // 1) Luôn lắng nghe cấu hình từ ESP32-S3
+  String line;
+  if (readCfgLineNonBlocking(line)) {
+    CamConfig newCfg;
+    if (parseCfgLine(line, newCfg)) {
+      if (!gCfg.valid || !sameCfg(gCfg, newCfg) || !gNetReady) {
+        gCfg = newCfg;
+        applyConfigAndConnect(gCfg);
+      }
+    }
+  }
+
+  // 2) Nếu chưa có cấu hình hoặc chưa kết nối mạng => không stream
+  if (!gCfg.valid || !gNetReady) {
+    delay(10);
+    return;
+  }
+
+  // 3) Loop websocket + stream frame
   ws.loop();
 
-  static uint32_t lastFrameMs = 0;
-  if (!ws.isConnected()) return;
+  if (!ws.isConnected()) {
+    delay(5);
+    return;
+  }
 
-  if (millis() - lastFrameMs < 40) return;
+  if (millis() - lastFrameMs < FRAME_INTERVAL_MS) return;
   lastFrameMs = millis();
 
   camera_fb_t* fb = esp_camera_fb_get();
   if (!fb) return;
 
-  bool ok = ws.sendBIN(fb->buf, fb->len);
+  ws.sendBIN(fb->buf, fb->len);
   esp_camera_fb_return(fb);
-
-  if (!ok) {
-    delay(5); // nhường CPU nếu send fail
-  }
 }
